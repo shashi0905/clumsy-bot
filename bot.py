@@ -199,35 +199,43 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ========= MESSAGE LISTENER =========
 async def message_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
+    if not message:
+        return
     chat_id = message.chat.id
     user_id = message.from_user.id
     text = (message.text or "").lower().strip()
-
-    # ----------- Mention-only trigger -----------
-    bot_username = context.bot.username.lower()
-    if f"@{bot_username}" not in text:
-        return
-    text = text.replace(f"@{bot_username}", "").strip()
 
     # ----------- Check temp storage (admin adding replies) -----------
     if user_id in temp_storage:
         data = temp_storage[user_id]
         item = None
+        # Capture media/files/text regardless of mention
         if message.photo:
-            item = {"type":"photo","file_id":message.photo[-1].file_id}
+            item = {"type": "photo", "file_id": message.photo[-1].file_id}
         elif message.video:
-            item = {"type":"video","file_id":message.video.file_id}
+            item = {"type": "video", "file_id": message.video.file_id}
         elif message.document:
-            item = {"type":"document","file_id":message.document.file_id}
-        elif message.text:
-            item = {"type":"text","content":message.text}
+            item = {"type": "document", "file_id": message.document.file_id}
+        elif message.text and not message.text.startswith("/"):
+            item = {"type": "text", "content": message.text}
         if item:
             data["items"].append(item)
-        return
+        return  # Do not process further
+
+    # ----------- Mention-only trigger for normal replies -----------
+    bot_username = context.bot.username.lower()
+    if chat_id > 0:
+        # Private chat: respond normally without mention
+        text_to_check = text
+    else:
+        # Group chat: only respond if bot is mentioned
+        if f"@{bot_username}" not in text:
+            return
+        text_to_check = text.replace(f"@{bot_username}", "").strip()
 
     # ----------- Keyword auto-reply with cooldown -----------
     for key, val in replies.items():
-        if text == key or text in val.get("aliases", []):
+        if text_to_check == key or text_to_check in val.get("aliases", []):
             now = time.time()
             cooldown_key = (chat_id, key)
             last_time = last_used.get(cooldown_key, 0)
@@ -240,16 +248,16 @@ async def message_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
             items = val.get("items", [])
             media_group = []
             for item in items:
-                if item["type"]=="photo":
+                if item["type"] == "photo":
                     media_group.append(InputMediaPhoto(item["file_id"]))
-                elif item["type"]=="video":
+                elif item["type"] == "video":
                     media_group.append(InputMediaVideo(item["file_id"]))
             if media_group:
                 await message.reply_media_group(media_group)
             for item in items:
-                if item["type"]=="text":
+                if item["type"] == "text":
                     await message.reply_text(item["content"])
-                elif item["type"]=="document":
+                elif item["type"] == "document":
                     await message.reply_document(item["file_id"])
 
 # ========= WELCOME =========
