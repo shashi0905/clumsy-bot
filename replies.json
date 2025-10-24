@@ -1,0 +1,29 @@
+{
+  "hospital": {
+    "aliases": [],
+    "media": [
+      {
+        "type": "photo",
+        "file_id": "AgACAgUAAxkBAAM6aPtetD3cA-Aqc8Pr20BiBiWzixgAAhXHMRsXQiBVd5LXWM7M3NQBAAMCAAN5AAM2BA"
+      }
+    ]
+  },
+  "capcut": {
+    "items": [
+      {
+        "type": "document",
+        "file_id": "BQACAgUAAxkBAAN1aPt3Ltiaz-u1RJB1YoMLF10kEmgAAtIcAALpgjlXPHB_LZzYruM2BA"
+      }
+    ],
+    "aliases": []
+  },
+  "send kinemaster": {
+    "items": [
+      {
+        "type": "document",
+        "file_id": "BQACAgUAAxkBAAN8aPt3XZbvN-P-Q33ywYW-GuB5wVoAAh4bAAJOOthXcsCi7mj5qDg2BA"
+      }
+    ],
+    "aliases": []
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "welcome_message": "🎉 Welcome, {name}! Glad to have you here!",
+  "replies": {
+    "help": ["🧭 Need help?", "Try typing 'rules' or 'hello'!"],
+    "rules": ["📜 Group Rules:", "1️⃣ Be nice", "2️⃣ No spam", "3️⃣ Have fun!"]
+  }
+}
