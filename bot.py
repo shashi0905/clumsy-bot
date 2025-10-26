@@ -1,210 +1,212 @@
-import os
 import json
-import asyncio
-from dotenv import load_dotenv
+import os
+import io
+import time
+from functools import wraps
 from telegram import (
-    Update, InputMediaPhoto, InputMediaVideo, InputMediaDocument, InputMediaAudio, InputMediaAnimation
+    Update, InputMediaPhoto, InputMediaVideo, InputMediaAnimation,
+    InlineKeyboardButton, InlineKeyboardMarkup
 )
 from telegram.ext import (
-    ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
+    ApplicationBuilder, CommandHandler, MessageHandler,
+    CallbackQueryHandler, ContextTypes, filters
 )
-from datetime import datetime, timedelta
 
-# === Load environment variables ===
-load_dotenv()
+# ========= LOAD ENV (optional for local) =========
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
+# ========= CONFIG =========
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_IDS = os.getenv("ADMIN_IDS", "")
 ADMINS = [int(x.strip()) for x in ADMIN_IDS.split(",") if x.strip().isdigit()]
+REPLIES_FILE = "replies.json"
+COOLDOWN_SECONDS = 10  # cooldown per keyword per chat
 
 if not BOT_TOKEN:
     raise ValueError("❌ BOT_TOKEN not found. Please set it as an environment variable.")
 
-# === File paths ===
-REPLIES_FILE = "replies.json"
-COOLDOWN_SECONDS = 10
-last_user_message_time = {}
+# ========= GLOBAL =========
+replies = {}
+temp_storage = {}
+welcome_message = "👋 Welcome to the group!"
+last_used = {}
+os.makedirs("data", exist_ok=True)
 
-# === Data storage ===
-if os.path.exists(REPLIES_FILE):
-    with open(REPLIES_FILE, "r") as f:
-        replies = json.load(f)
-else:
-    replies = {}
-
-# === Helper functions ===
+# ========= UTILS =========
 def save_replies():
-    with open(REPLIES_FILE, "w") as f:
+    with open(REPLIES_FILE, "w", encoding="utf-8") as f:
         json.dump(replies, f, indent=2)
 
-async def is_admin(user, chat):
-    if user.id in ADMINS:
-        return True
+def load_replies():
+    global replies
+    if os.path.exists(REPLIES_FILE):
+        with open(REPLIES_FILE, "r", encoding="utf-8") as f:
+            replies = json.load(f)
+
+async def is_group_admin(update: Update):
+    chat = update.effective_chat
+    user = update.effective_user
     if chat.type in ["group", "supergroup"]:
         member = await chat.get_member(user.id)
         return member.status in ["administrator", "creator"]
     return False
 
-# === Commands ===
+def admin_only(func):
+    @wraps(func)
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
+        user_id = update.effective_user.id
+        if user_id not in ADMINS and not await is_group_admin(update):
+            await update.message.reply_text("🚫 You don’t have permission to use this command.")
+            return
+        return await func(update, context, *args, **kwargs)
+    return wrapper
+
+# ========= COMMANDS =========
+@admin_only
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 Hi! I'm your group assistant bot.\nUse /help to see what I can do.")
+    await update.message.reply_text("🤖 Bot is active and ready!")
 
+@admin_only
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = (
-        "🤖 *Available Commands:*\n\n"
-        "/start – Greet the bot\n"
-        "/help – Show this help message\n"
-        "/setreply <keyword> – Set up media/text replies for a keyword (Admin only)\n"
-        "/done – Save the reply setup (after sending media/files)\n"
-        "/deletereply <keyword> – Delete a keyword’s reply (Admin only)\n"
-        "/listreplies – List all configured keywords\n\n"
-        "💡 *Usage Tips:*\n"
-        "- Mention the bot (@your_bot_name) with a keyword to trigger replies.\n"
-        "- Media, GIFs, audio, and files are supported.\n"
-        "- Cooldown: 10 seconds per user to prevent spam."
-    )
-    await update.message.reply_text(msg, parse_mode="Markdown")
+    help_text = """
+🛠 **Bot Commands**
+• /start — Check bot status
+• /help — Show this help message
+• /setwelcome <msg> — Set welcome message
+• /setreply <keyword> — Start adding media/text/files for a keyword
+• /done — Finish adding media/text for the current keyword
+• /addalias <keyword> <aliases> — Add alias words for keyword
+• /deletereply <keyword> — Delete a saved reply
+• /listreplies — List all saved replies
+• /exportreplies — Export all saved replies
+• /importreplies — Import replies from JSON file
+(Use @BotMention <keyword> to trigger in groups)
+"""
+    await update.message.reply_text(help_text, parse_mode="Markdown")
 
-# === Admin: Set replies ===
-user_sessions = {}
+@admin_only
+async def set_welcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global welcome_message
+    if not context.args:
+        await update.message.reply_text("Usage: /setwelcome <message>")
+        return
+    welcome_message = " ".join(context.args)
+    await update.message.reply_text(f"✅ Welcome message set to:\n{welcome_message}")
 
-async def setreply(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    chat = update.effective_chat
-    if not await is_admin(user, chat):
-        return await update.message.reply_text("🚫 Only admins can set replies.")
-    if len(context.args) == 0:
-        return await update.message.reply_text("Usage: `/setreply <keyword>`", parse_mode="Markdown")
-
-    keyword = " ".join(context.args).lower()
-    user_sessions[user.id] = {"keyword": keyword, "media": []}
+@admin_only
+async def set_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Usage: /setreply <keyword>")
+        return
+    key = " ".join(context.args).lower().strip()
+    temp_storage[update.effective_user.id] = {"key": key, "items": []}
     await update.message.reply_text(
-        f"✅ Send the media, files, or messages for *'{keyword}'*.\nWhen done, type `/done`.",
+        f"📥 Send media/files/text for *{key}*. When done, send /done.",
         parse_mode="Markdown"
     )
 
+@admin_only
 async def done(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if user.id not in user_sessions:
-        return await update.message.reply_text("⚠️ No reply setup in progress.")
-    data = user_sessions[user.id]
-    keyword = data["keyword"]
-    media = data["media"]
-
-    if not media:
-        del user_sessions[user.id]
-        return await update.message.reply_text("⚠️ No media or text received, nothing saved.")
-
-    replies[keyword] = media
+    user_id = update.effective_user.id
+    if user_id not in temp_storage or not temp_storage[user_id]["items"]:
+        await update.message.reply_text("⚠️ No media or text received, nothing saved.")
+        return
+    data = temp_storage.pop(user_id)
+    key = data["key"]
+    replies[key] = {"items": data["items"], "aliases": []}
     save_replies()
-    del user_sessions[user.id]
-    await update.message.reply_text(f"✅ Reply for *'{keyword}'* saved successfully!", parse_mode="Markdown")
+    await update.message.reply_text(f"✅ Saved reply for keyword: *{key}*", parse_mode="Markdown")
 
-async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if user.id not in user_sessions:
-        return
-
-    session = user_sessions[user.id]
-    media_entry = {}
-
-    if update.message.photo:
-        media_entry = {"type": "photo", "file_id": update.message.photo[-1].file_id}
-    elif update.message.video:
-        media_entry = {"type": "video", "file_id": update.message.video.file_id}
-    elif update.message.animation:  # GIF support
-        media_entry = {"type": "animation", "file_id": update.message.animation.file_id}
-    elif update.message.audio:
-        media_entry = {"type": "audio", "file_id": update.message.audio.file_id}
-    elif update.message.document:
-        media_entry = {"type": "document", "file_id": update.message.document.file_id}
-    elif update.message.text:
-        media_entry = {"type": "text", "text": update.message.text}
-
-    if media_entry:
-        session["media"].append(media_entry)
-        await update.message.reply_text("📥 Added to reply list.")
-
-# === Admin: Delete or list replies ===
-async def deletereply(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    chat = update.effective_chat
-    if not await is_admin(user, chat):
-        return await update.message.reply_text("🚫 Only admins can delete replies.")
-    if len(context.args) == 0:
-        return await update.message.reply_text("Usage: `/deletereply <keyword>`", parse_mode="Markdown")
-
-    keyword = " ".join(context.args).lower()
-    if keyword in replies:
-        del replies[keyword]
-        save_replies()
-        await update.message.reply_text(f"🗑️ Deleted reply for *'{keyword}'*.", parse_mode="Markdown")
-    else:
-        await update.message.reply_text("⚠️ No such keyword found.")
-
-async def listreplies(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not replies:
-        await update.message.reply_text("📭 No replies configured yet.")
-    else:
-        msg = "🗂️ *Configured Keywords:*\n" + "\n".join([f"- {k}" for k in replies.keys()])
-        await update.message.reply_text(msg, parse_mode="Markdown")
-
-# === Respond to user messages ===
-async def respond(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ========= MESSAGE HANDLER =========
+async def message_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
-    chat = update.effective_chat
-    user = update.effective_user
-
-    # Ensure bot is mentioned in group messages
-    if chat.type in ["group", "supergroup"] and context.bot.username.lower() not in message.text.lower():
+    if not message:
         return
 
-    # Cooldown check
-    last_time = last_user_message_time.get(user.id)
-    if last_time and datetime.now() - last_time < timedelta(seconds=COOLDOWN_SECONDS):
-        return await message.reply_text(f"⏳ Please wait {COOLDOWN_SECONDS}s before sending next message.")
-    last_user_message_time[user.id] = datetime.now()
+    chat_type = update.effective_chat.type
+    text = (message.text or message.caption or "").lower().strip()
+    user_id = message.from_user.id
+    chat_id = message.chat.id
 
-    text = message.text.replace(f"@{context.bot.username}", "").strip().lower()
-    matched = next((key for key in replies if key in text), None)
-    if not matched:
+    # Debug log
+    print(f"[DEBUG] chat={chat_type}, user={user_id}, text={text}")
+
+    # Handle adding replies
+    if user_id in temp_storage:
+        data = temp_storage[user_id]
+        item = None
+        if message.photo:
+            item = {"type": "photo", "file_id": message.photo[-1].file_id}
+        elif message.video:
+            item = {"type": "video", "file_id": message.video.file_id}
+        elif message.animation:  # GIF
+            item = {"type": "animation", "file_id": message.animation.file_id}
+        elif message.audio:
+            item = {"type": "audio", "file_id": message.audio.file_id}
+        elif message.document:
+            item = {"type": "document", "file_id": message.document.file_id}
+        elif message.text:
+            item = {"type": "text", "content": message.text}
+
+        if item:
+            data["items"].append(item)
         return
 
-    reply_items = replies[matched]
-    media_groups = {"photo": [], "video": [], "animation": [], "audio": [], "document": []}
+    # Handle group mentions
+    bot_username = context.bot.username.lower()
+    if chat_type in ["group", "supergroup"]:
+        if f"@{bot_username}" not in text:
+            return
+        text = text.replace(f"@{bot_username}", "").strip()
 
-    for item in reply_items:
-        t = item["type"]
-        if t == "photo":
-            media_groups["photo"].append(InputMediaPhoto(item["file_id"]))
-        elif t == "video":
-            media_groups["video"].append(InputMediaVideo(item["file_id"]))
-        elif t == "animation":
-            media_groups["animation"].append(InputMediaAnimation(item["file_id"]))
-        elif t == "audio":
-            media_groups["audio"].append(InputMediaAudio(item["file_id"]))
-        elif t == "document":
-            media_groups["document"].append(InputMediaDocument(item["file_id"]))
-        elif t == "text":
-            await message.reply_text(item["text"])
+    # Cooldown + reply logic
+    for key, val in replies.items():
+        if text == key or text in val.get("aliases", []):
+            now = time.time()
+            cooldown_key = (chat_id, key)
+            if now - last_used.get(cooldown_key, 0) < COOLDOWN_SECONDS:
+                remaining = int(COOLDOWN_SECONDS - (now - last_used[cooldown_key]))
+                await message.reply_text(f"⏳ Please wait {remaining}s before sending next message.")
+                return
+            last_used[cooldown_key] = now
 
-    # Send grouped media (if any)
-    for t, group in media_groups.items():
-        if len(group) == 1:
-            await message.reply_media_group([group[0]])
-        elif group:
-            await message.reply_media_group(group)
+            items = val.get("items", [])
+            media_group = []
+            for item in items:
+                t = item["type"]
+                if t == "photo":
+                    media_group.append(InputMediaPhoto(item["file_id"]))
+                elif t == "video":
+                    media_group.append(InputMediaVideo(item["file_id"]))
+                elif t == "animation":
+                    media_group.append(InputMediaAnimation(item["file_id"]))
+            if media_group:
+                await message.reply_media_group(media_group)
+            for item in items:
+                t = item["type"]
+                if t == "text":
+                    await message.reply_text(item["content"])
+                elif t == "document":
+                    await message.reply_document(item["file_id"])
+                elif t == "audio":
+                    await message.reply_audio(item["file_id"])
 
-# === Main ===
-app = ApplicationBuilder().token(BOT_TOKEN).build()
+# ========= MAIN =========
+if __name__ == "__main__":
+    load_replies()
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-app.add_handler(CommandHandler("start", start))
-app.add_handler(CommandHandler("help", help_command))
-app.add_handler(CommandHandler("setreply", setreply))
-app.add_handler(CommandHandler("done", done))
-app.add_handler(CommandHandler("deletereply", deletereply))
-app.add_handler(CommandHandler("listreplies", listreplies))
-app.add_handler(MessageHandler(filters.ALL & (~filters.COMMAND), handle_media))
-app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), respond))
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("setwelcome", set_welcome))
+    app.add_handler(CommandHandler("setreply", set_reply))
+    app.add_handler(CommandHandler("done", done))
 
-print("🚀 Bot is running...")
-app.run_polling()
+    app.add_handler(MessageHandler(filters.ALL, message_listener))
+
+    print("🤖 Bot is running...")
+    app.run_polling()
