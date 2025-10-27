@@ -4,39 +4,36 @@ import io
 import time
 from functools import wraps
 from telegram import (
-    Update, InputMediaPhoto, InputMediaVideo, InputMediaAnimation,
-    InlineKeyboardButton, InlineKeyboardMarkup
+    Update, InputMediaPhoto, InputMediaVideo, InputMediaAnimation
 )
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
-    CallbackQueryHandler, ContextTypes, filters
+    ContextTypes, filters
 )
 
-# ========= LOAD ENV (optional for local) =========
+# ===== Load environment variables =====
 try:
     from dotenv import load_dotenv
     load_dotenv()
 except ImportError:
     pass
 
-# ========= CONFIG =========
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_IDS = os.getenv("ADMIN_IDS", "")
 ADMINS = [int(x.strip()) for x in ADMIN_IDS.split(",") if x.strip().isdigit()]
 REPLIES_FILE = "replies.json"
-COOLDOWN_SECONDS = 10  # cooldown per keyword per chat
+COOLDOWN_SECONDS = 10
 
 if not BOT_TOKEN:
     raise ValueError("❌ BOT_TOKEN not found. Please set it as an environment variable.")
 
-# ========= GLOBAL =========
+# ===== Globals =====
 replies = {}
 temp_storage = {}
-welcome_message = "👋 Welcome to the group!"
+welcome_message = "👋 Welcome!"
 last_used = {}
-os.makedirs("data", exist_ok=True)
 
-# ========= UTILS =========
+# ===== Helpers =====
 def save_replies():
     with open(REPLIES_FILE, "w", encoding="utf-8") as f:
         json.dump(replies, f, indent=2)
@@ -65,28 +62,28 @@ def admin_only(func):
         return await func(update, context, *args, **kwargs)
     return wrapper
 
-# ========= COMMANDS =========
+# ===== Commands =====
 @admin_only
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🤖 Bot is active and ready!")
+    await update.message.reply_text("🤖 Bot is active and running!")
 
 @admin_only
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    help_text = """
+    text = """
 🛠 **Bot Commands**
-• /start — Check bot status
-• /help — Show this help message
-• /setwelcome <msg> — Set welcome message
-• /setreply <keyword> — Start adding media/text/files for a keyword
-• /done — Finish adding media/text for the current keyword
-• /addalias <keyword> <aliases> — Add alias words for keyword
-• /deletereply <keyword> — Delete a saved reply
-• /listreplies — List all saved replies
-• /exportreplies — Export all saved replies
-• /importreplies — Import replies from JSON file
+• /start — Check bot status  
+• /help — Show this help  
+• /setwelcome <msg> — Set welcome message  
+• /setreply <keyword> — Add a new reply (media/text/file)  
+• /done — Finish adding reply  
+• /listreplies — List all saved replies  
+• /addalias <keyword> <aliases> — Add alias words  
+• /deletereply <keyword> — Delete a reply  
+• /exportreplies — Export replies as JSON  
+• /importreplies — Import replies from uploaded JSON  
 (Use @BotMention <keyword> to trigger in groups)
 """
-    await update.message.reply_text(help_text, parse_mode="Markdown")
+    await update.message.reply_text(text, parse_mode="Markdown")
 
 @admin_only
 async def set_welcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -121,7 +118,63 @@ async def done(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_replies()
     await update.message.reply_text(f"✅ Saved reply for keyword: *{key}*", parse_mode="Markdown")
 
-# ========= MESSAGE HANDLER =========
+@admin_only
+async def list_replies(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not replies:
+        await update.message.reply_text("📂 No replies saved yet.")
+        return
+    msg = "\n".join([f"• {k} (aliases: {', '.join(v.get('aliases', [])) or 'None'})" for k, v in replies.items()])
+    await update.message.reply_text(f"🗂 Saved Replies:\n{msg}")
+
+@admin_only
+async def add_alias(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if len(context.args) < 2:
+        await update.message.reply_text("Usage: /addalias <keyword> <aliases>")
+        return
+    key = context.args[0].lower().strip()
+    aliases = [x.lower() for x in context.args[1:]]
+    if key not in replies:
+        await update.message.reply_text("⚠️ Keyword not found.")
+        return
+    replies[key].setdefault("aliases", []).extend(aliases)
+    save_replies()
+    await update.message.reply_text(f"✅ Added aliases for *{key}*: {', '.join(aliases)}", parse_mode="Markdown")
+
+@admin_only
+async def delete_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Usage: /deletereply <keyword>")
+        return
+    key = " ".join(context.args).lower().strip()
+    if key in replies:
+        replies.pop(key)
+        save_replies()
+        await update.message.reply_text(f"🗑 Deleted reply for *{key}*", parse_mode="Markdown")
+    else:
+        await update.message.reply_text("⚠️ No such keyword found.")
+
+@admin_only
+async def export_replies(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not replies:
+        await update.message.reply_text("No replies to export.")
+        return
+    buf = io.BytesIO(json.dumps(replies, indent=2).encode())
+    buf.name = "replies_export.json"
+    await update.message.reply_document(buf)
+
+@admin_only
+async def import_replies(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message.document:
+        await update.message.reply_text("Please attach a JSON file to import.")
+        return
+    file = await update.message.document.get_file()
+    content = await file.download_as_bytearray()
+    data = json.loads(content.decode())
+    replies.update(data)
+    save_replies()
+    await update.message.reply_text(f"✅ Imported {len(data)} replies successfully.")
+
+# ===== Message listener =====
 async def message_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     if not message:
@@ -131,8 +184,8 @@ async def message_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (message.text or message.caption or "").lower().strip()
     user_id = message.from_user.id
     chat_id = message.chat.id
+    bot_username = context.bot.username.lower()
 
-    # Debug log
     print(f"[DEBUG] chat={chat_type}, user={user_id}, text={text}")
 
     # Handle adding replies
@@ -143,7 +196,7 @@ async def message_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
             item = {"type": "photo", "file_id": message.photo[-1].file_id}
         elif message.video:
             item = {"type": "video", "file_id": message.video.file_id}
-        elif message.animation:  # GIF
+        elif message.animation:
             item = {"type": "animation", "file_id": message.animation.file_id}
         elif message.audio:
             item = {"type": "audio", "file_id": message.audio.file_id}
@@ -156,14 +209,13 @@ async def message_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
             data["items"].append(item)
         return
 
-    # Handle group mentions
-    bot_username = context.bot.username.lower()
+    # In groups: only respond when mentioned
     if chat_type in ["group", "supergroup"]:
         if f"@{bot_username}" not in text:
             return
         text = text.replace(f"@{bot_username}", "").strip()
 
-    # Cooldown + reply logic
+    # Handle replies
     for key, val in replies.items():
         if text == key or text in val.get("aliases", []):
             now = time.time()
@@ -195,7 +247,7 @@ async def message_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 elif t == "audio":
                     await message.reply_audio(item["file_id"])
 
-# ========= MAIN =========
+# ===== Main =====
 if __name__ == "__main__":
     load_replies()
     app = ApplicationBuilder().token(BOT_TOKEN).build()
@@ -205,6 +257,11 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("setwelcome", set_welcome))
     app.add_handler(CommandHandler("setreply", set_reply))
     app.add_handler(CommandHandler("done", done))
+    app.add_handler(CommandHandler("listreplies", list_replies))
+    app.add_handler(CommandHandler("addalias", add_alias))
+    app.add_handler(CommandHandler("deletereply", delete_reply))
+    app.add_handler(CommandHandler("exportreplies", export_replies))
+    app.add_handler(CommandHandler("importreplies", import_replies))
 
     app.add_handler(MessageHandler(filters.ALL, message_listener))
 
